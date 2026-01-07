@@ -1,0 +1,185 @@
+#ifndef STDSO
+#define STDSO
+
+// @author: htcdevk0
+
+#include <string>
+#include <memory>
+#include <functional>
+#include <stdexcept>
+#include <iostream>
+#include <unordered_map>
+#include <dlfcn.h>
+
+#define STDSO_VERSION "1.0.0"
+
+namespace stdso
+{
+
+#define SO_EXPORT __attribute__((visibility("default")))
+#define SO_IMPORT
+
+#define EXPORT extern "C" SO_EXPORT
+
+#define EXPORT_CLASS(T)                                      \
+    extern "C" SO_EXPORT T *create_##T() { return new T(); } \
+    extern "C" SO_EXPORT void destroy_##T(T *obj) { delete obj; }
+
+#define EXPORT_VAR(type, name) \
+    extern "C" SO_EXPORT type name
+
+class SO
+{
+private:
+    void *handle = nullptr;
+    std::string path;
+
+    SO(void *h, const std::string &p) : handle(h), path(p) {}
+
+public:
+    explicit SO(const std::string &so_path) : path(so_path)
+    {
+        handle = dlopen(so_path.c_str(), RTLD_LAZY | RTLD_LOCAL);
+        if (!handle)
+        {
+            throw std::runtime_error(
+                std::string("Failed to load ") + so_path + ": " + dlerror());
+        }
+    }
+
+    ~SO()
+    {
+        if (handle)
+        {
+            dlclose(handle);
+        }
+    }
+
+    SO(const SO &) = delete;
+    SO &operator=(const SO &) = delete;
+
+    SO(SO &&other) noexcept : handle(other.handle), path(std::move(other.path))
+    {
+        other.handle = nullptr;
+    }
+
+    SO &operator=(SO &&other) noexcept
+    {
+        if (this != &other)
+        {
+            if (handle)
+            {
+                dlclose(handle);
+            }
+            handle = other.handle;
+            path = std::move(other.path);
+            other.handle = nullptr;
+        }
+        return *this;
+    }
+
+    template <typename Func>
+    Func *get(const std::string &function_name) const
+    {
+        if (!handle)
+            return nullptr;
+
+        void *func = dlsym(handle, function_name.c_str());
+        if (!func)
+        {
+            std::cerr << "Symbol '" << function_name
+                      << "' not found in " << path
+                      << ": " << dlerror() << std::endl;
+            return nullptr;
+        }
+
+        return reinterpret_cast<Func *>(func);
+    }
+
+    template <typename Func>
+    Func *operator()(const std::string &function_name) const
+    {
+        return get<Func>(function_name);
+    }
+
+    operator bool() const { return handle != nullptr; }
+
+    const std::string &name() const { return path; }
+
+    void reload()
+    {
+        if (handle)
+        {
+            dlclose(handle);
+        }
+        handle = dlopen(path.c_str(), RTLD_LAZY | RTLD_LOCAL);
+        if (!handle)
+        {
+            throw std::runtime_error(
+                std::string("Failed to reload ") + path + ": " + dlerror());
+        }
+    }
+
+    friend SO load_global(const std::string &so_path);
+};
+
+inline SO load(const std::string &so_path)
+{
+    return SO(so_path);
+}
+
+inline SO load_global(const std::string &so_path)
+{
+    void *handle = dlopen(so_path.c_str(), RTLD_LAZY | RTLD_GLOBAL);
+    if (!handle)
+    {
+        throw std::runtime_error(
+            std::string("Failed to load globally ") + so_path + ": " + dlerror());
+    }
+    return SO(handle, so_path);
+}
+
+class SOManager
+{
+private:
+    std::unordered_map<std::string, SO> so_objects;
+
+public:
+    SO &load(const std::string &name, const std::string &path, bool global = false)
+    {
+        SO so = global ? load_global(path) : stdso::load(path);
+        return so_objects.emplace(name, std::move(so)).first->second;
+    }
+
+    SO &get(const std::string &name)
+    {
+        auto it = so_objects.find(name);
+        if (it == so_objects.end())
+        {
+            throw std::runtime_error("SO not loaded: " + name);
+        }
+        return it->second;
+    }
+
+    bool unload(const std::string &name)
+    {
+        return so_objects.erase(name) > 0;
+    }
+
+    bool has(const std::string &name) const
+    {
+        return so_objects.find(name) != so_objects.end();
+    }
+
+    void clear()
+    {
+        so_objects.clear();
+    }
+};
+
+#define LOAD_SO(var_name, so_path) auto var_name = stdso::load(so_path)
+#define LOAD_SO_GLOBAL(var_name, so_path) auto var_name = stdso::load_global(so_path)
+
+}
+
+#endif
