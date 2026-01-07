@@ -3,6 +3,11 @@
 
 // @author: htcdevk0
 
+//
+// Last patch [1.1.0]:
+// Added std::vector support
+//
+
 #include <string>
 #include <memory>
 #include <functional>
@@ -10,16 +15,59 @@
 #include <iostream>
 #include <unordered_map>
 #include <dlfcn.h>
+#include <vector>
 
 #define STDSO_VERSION "1.0.0"
 
 namespace stdso
 {
 
+    namespace detail
+    {
+        template <typename T>
+        struct is_std_vector : std::false_type
+        {
+        };
+
+        template <typename T, typename A>
+        struct is_std_vector<std::vector<T, A>> : std::true_type
+        {
+        };
+    }
+
+    template <typename T>
+    constexpr bool is_std_vector = detail::is_std_vector<T>::value;
+
 #define SO_EXPORT __attribute__((visibility("default")))
 #define SO_IMPORT
 
 #define EXPORT extern "C" SO_EXPORT
+
+#define EXPORT_VECTOR(type, name, size) \
+    EXPORT type name[size];             \
+    EXPORT size_t name##_size = (size)
+
+#define EXPORT_VECTOR_INIT(type, name, size, ...) \
+    EXPORT type name[size] = {__VA_ARGS__};       \
+    EXPORT size_t name##_size = (size)
+
+#define EXPORT_DYNAMIC_VECTOR(type, name) \
+    EXPORT type *name = nullptr;          \
+    EXPORT size_t name##_size = 0;        \
+    EXPORT void name##_init(size_t n)     \
+    {                                     \
+        if (name)                         \
+            delete[] name;                \
+        name = new type[n];               \
+        name##_size = n;                  \
+    }                                     \
+    EXPORT void name##_free()             \
+    {                                     \
+        if (name)                         \
+            delete[] name;                \
+        name = nullptr;                   \
+        name##_size = 0;                  \
+    }
 
 #define EXPORT_CLASS(T)                                      \
     extern "C" SO_EXPORT T *create_##T() { return new T(); } \
@@ -119,7 +167,22 @@ namespace stdso
                 }
             }
 
-            if constexpr (std::is_function_v<T>)
+            if constexpr (is_std_vector<T>)
+            {
+                using ValueType = typename T::value_type;
+                ValueType *data_ptr = reinterpret_cast<ValueType *>(ptr);
+                size_t size = 0;
+
+                void *size_ptr = dlsym(handle, (name + "_size").c_str());
+
+                if (size_ptr)
+                {
+                    size = *reinterpret_cast<size_t *>(size_ptr);
+                }
+
+                return T(data_ptr, data_ptr + size);
+            }
+            else if constexpr (std::is_function_v<T>)
             {
                 using FuncPtr = T *;
                 return reinterpret_cast<FuncPtr>(ptr);
